@@ -161,8 +161,12 @@ namespace Nuget.NupkgParser
                     foreach (var fileName in _packageCollection[id].Keys)
                     {
                         file = fileName;
-                        versions.Append(_packageCollection[id][fileName]);
-                        versions.Append(" ");
+                        foreach(var version in _packageCollection[id][fileName])
+                        {
+                            versions.Append(version);
+                            versions.Append(" ");
+                        }
+
                     }
                     w.WriteLine(string.Concat(id, ",", file, ",", versions));
                 }

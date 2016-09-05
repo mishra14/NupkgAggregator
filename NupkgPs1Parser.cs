@@ -1,11 +1,9 @@
 ﻿using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NuGet.Packaging;
@@ -19,14 +17,14 @@ namespace Nuget.NupkgParser
         private string _outputPath;
         private string _logFile;
 
-        private ConcurrentDictionary<string, ConcurrentDictionary<string, List<string>>> _packageCollection;
+        private ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>> _packageCollection;
 
         public NupkgPs1Parser(string inputPath, string outputPath, string logFile, string errorLogFile)
         {
             _inputPath = inputPath;
             _outputPath = outputPath;
             _logFile = logFile;
-            _packageCollection = new ConcurrentDictionary<string, ConcurrentDictionary<string, List<string>>>();
+            _packageCollection = new ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>>();
             if (!File.Exists(_logFile))
             {
                 File.Create(_logFile).Close();
@@ -59,14 +57,10 @@ namespace Nuget.NupkgParser
                     if (count % 5000 == 0)
                     {
                         Console.WriteLine("Done with " + count + " packages with " + errorCount + " errors");
-
-                        double percentDone =  (double)count / (double)inputFiles.Length;
-
+                        double percentDone = (double)count / (double)inputFiles.Length;
                         var timeLeft = ((timer.Elapsed.TotalSeconds / count) * inputFiles.Length) - timer.Elapsed.TotalSeconds;
-
                         var dateEnd = DateTime.Now.AddSeconds(timeLeft);
                         var timeLeftSpan = TimeSpan.FromSeconds(timeLeft);
-
                         Console.WriteLine($"Done in {timeLeftSpan} at {dateEnd}");
                     }
                     try
@@ -79,9 +73,12 @@ namespace Nuget.NupkgParser
                         Console.WriteLine("Exception while parsing " + file);
                         Console.WriteLine(ex.Message);
                         logError(Path.GetFileName(file), Path.Combine(_outputPath, @"error_" + Thread.CurrentThread.ManagedThreadId + ".txt"));
+                        var curroptFilePath = Path.Combine(@"f:\CurroptPackages", Path.GetFileName(file));
+
+                        File.Move(file, curroptFilePath);
                     }
                 });
-                Console.WriteLine("Done with all the" + count + " packages");
+                Console.WriteLine("Done with all the " + count + " packages");
             }
             catch (AggregateException ae)
             {
@@ -134,19 +131,17 @@ namespace Nuget.NupkgParser
             string version = packageIdentity.Version.ToString();
             if (_packageCollection.ContainsKey(id))
             {
-                if (_packageCollection[id].ContainsKey(fileName))
+                if (!_packageCollection[id].ContainsKey(fileName))
                 {
-                    _packageCollection[id][fileName].Add(version);
+                    _packageCollection[id][fileName] = new ConcurrentQueue<string>();
                 }
-                else
-                {
-                    _packageCollection[id][fileName] = new List<string> { version };
-                }
+                _packageCollection[id][fileName].Enqueue(version);
             }
             else
             {
-                _packageCollection[id] = new ConcurrentDictionary<string, List<string>>();
-                _packageCollection[id][fileName] = new List<string> { version };
+                _packageCollection[id] = new ConcurrentDictionary<string, ConcurrentQueue<string>>();
+                _packageCollection[id][fileName] = new ConcurrentQueue<string>();
+                _packageCollection[id][fileName].Enqueue(version);
             }
         }
 
@@ -156,19 +151,14 @@ namespace Nuget.NupkgParser
             {
                 foreach (var id in _packageCollection.Keys)
                 {
-                    var versions = new StringBuilder();
-                    var file = "";
                     foreach (var fileName in _packageCollection[id].Keys)
                     {
-                        file = fileName;
-                        foreach(var version in _packageCollection[id][fileName])
-                        {
-                            versions.Append(version);
-                            versions.Append(" ");
-                        }
-
+                        var x = _packageCollection[id][fileName];
+                        var versionList = _packageCollection[id][fileName].ToArray();
+                        var delimiter = " ";
+                        var versionString = versionList.Aggregate((i, j) => i + delimiter + j);
+                        w.WriteLine(string.Concat(id, ",", fileName, ",", versionString));
                     }
-                    w.WriteLine(string.Concat(id, ",", file, ",", versions));
                 }
             }
         }

@@ -72,9 +72,7 @@ namespace Nuget.NupkgParser
                         errorCount++;
                         Console.WriteLine("Exception while parsing " + file);
                         Console.WriteLine(ex.Message);
-                        logError(Path.GetFileName(file), Path.Combine(_outputPath, @"error_" + Thread.CurrentThread.ManagedThreadId + ".txt"));
                         var curroptFilePath = Path.Combine(@"f:\CurroptPackages", Path.GetFileName(file));
-
                         File.Move(file, curroptFilePath);
                     }
                 });

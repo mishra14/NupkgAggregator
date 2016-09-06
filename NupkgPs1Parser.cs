@@ -1,10 +1,10 @@
 ﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
@@ -15,28 +15,41 @@ namespace Nuget.NupkgParser
     {
         private string _inputPath;
         private string _outputPath;
-        private string _logFile;
+        private string _resultsCsv;
+        private string _uniqueIdCsv;
+        private string _allPackagesCsv;
 
         private ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>> _packageCollection;
 
-        public NupkgPs1Parser(string inputPath, string outputPath, string logFile, string errorLogFile)
+        public NupkgPs1Parser(string inputPath, string outputPath, string logPath, string errorLogFile)
         {
             _inputPath = inputPath;
             _outputPath = outputPath;
-            _logFile = logFile;
+            _resultsCsv = Path.Combine(logPath, @"results.csv");
+            _uniqueIdCsv = Path.Combine(logPath, @"uniqueId.csv");
+            _allPackagesCsv = Path.Combine(logPath, @"allPackages.csv");
             _packageCollection = new ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>>();
-            if (!File.Exists(_logFile))
+            createFile(_resultsCsv);
+            createFile(_uniqueIdCsv);
+            createFile(_allPackagesCsv);
+        }
+
+        public void createFile(string path)
+        {
+            if (!File.Exists(path))
             {
-                File.Create(_logFile).Close();
+                File.Create(path).Close();
             }
         }
 
         private static void Main(string[] args)
         {
-            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(@"F:\MirrorPackages", @"F:\ProcessedPackages", @"F:\ProcessedPackages\log.csv", @"F:\ProcessedPackages\errors.txt");
+            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(@"F:\MirrorPackages", @"F:\ProcessedPackages", @"F:\ProcessedPackages", @"F:\ProcessedPackages\errors.txt");
             nupkgParser.enumerateFiles();
             Console.WriteLine("Writting results into log");
             nupkgParser.populateResultsCsv();
+            nupkgParser.populateUniqueIdCsv();
+            nupkgParser.populateAllPackageCsv();
         }
 
         private void enumerateFiles()
@@ -45,12 +58,9 @@ namespace Nuget.NupkgParser
             {
                 Stopwatch timer = new Stopwatch();
                 timer.Start();
-
                 var inputFiles = Directory.EnumerateFiles(_inputPath).ToArray();
-
                 long count = 0;
                 long errorCount = 0;
-                ParallelOptions ops = new ParallelOptions() { MaxDegreeOfParallelism = 16 };
                 Parallel.ForEach(inputFiles, file =>
                 {
                     count++;
@@ -145,7 +155,7 @@ namespace Nuget.NupkgParser
 
         private void populateResultsCsv()
         {
-            using (StreamWriter w = File.AppendText(_logFile))
+            using (StreamWriter w = File.AppendText(_resultsCsv))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
@@ -156,6 +166,40 @@ namespace Nuget.NupkgParser
                         var delimiter = " ";
                         var versionString = versionList.Aggregate((i, j) => i + delimiter + j);
                         w.WriteLine(string.Concat(id, ",", fileName, ",", versionString));
+                    }
+                }
+            }
+        }
+
+        private void populateUniqueIdCsv()
+        {
+            using (StreamWriter w = File.AppendText(_uniqueIdCsv))
+            {
+                foreach (var id in _packageCollection.Keys)
+                {
+                    w.WriteLine(id);
+                }
+            }
+        }
+
+        private void populateAllPackageCsv()
+        {
+            var seen = new HashSet<string>();
+            using (StreamWriter w = File.AppendText(_allPackagesCsv))
+            {
+                foreach (var id in _packageCollection.Keys)
+                {
+                    foreach (var fileName in _packageCollection[id].Keys)
+                    {
+                        foreach (var version in _packageCollection[id][fileName])
+                        {
+                            var idVersionString = string.Concat(id + ", " + version);
+                            if (!seen.Contains(idVersionString))
+                            {
+                                seen.Add(idVersionString);
+                                w.WriteLine(idVersionString);
+                            }
+                        }
                     }
                 }
             }
@@ -180,7 +224,7 @@ namespace Nuget.NupkgParser
 
         private void log(string line)
         {
-            using (StreamWriter w = File.AppendText(_logFile))
+            using (StreamWriter w = File.AppendText(_resultsCsv))
             {
                 w.WriteLine(line);
             }

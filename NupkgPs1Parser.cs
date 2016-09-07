@@ -1,12 +1,14 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 using System.Threading.Tasks;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
@@ -19,28 +21,36 @@ namespace Nuget.NupkgParser
 
         private string _inputPath;
         private string _outputPath;
-        private string _resultsCsv;
-        private string _uniqueIdCsv;
-        private string _allPackagesCsv;
+        private string _resultsCsvPath;
+        private string _uniqueIdCsvPath;
+        private string _allPackagesCsvPath;
+        private string _packageCollectionFilePath;
+        private object _packageCollectionLock;
 
-        private ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>> _packageCollection;
-        private ConcurrentDictionary<string, byte> _fileHashes;
+        private Dictionary<string, Dictionary<string, List<string>>> _packageCollection;
         private Dictionary<string, Dictionary<string, long>> _downloadCounts;
+        private Dictionary<string, long> _downloadCountsOverIds;
+        private HashSet<string> _unlistedPackageIds;
 
         public NupkgPs1Parser(string inputPath, string outputPath, string logPath)
         {
             _inputPath = inputPath;
             _outputPath = outputPath;
-            _resultsCsv = Path.Combine(logPath, @"results.csv");
-            _uniqueIdCsv = Path.Combine(logPath, @"uniqueId.csv");
-            _allPackagesCsv = Path.Combine(logPath, @"allPackages.csv");
-            _packageCollection = new ConcurrentDictionary<string, ConcurrentDictionary<string, ConcurrentQueue<string>>>();
-            _fileHashes = new ConcurrentDictionary<string, byte>();
-            _downloadCounts = new Dictionary<string, Dictionary<string, long>>();
+            _resultsCsvPath = Path.Combine(logPath, @"results.csv");
+            _uniqueIdCsvPath = Path.Combine(logPath, @"uniqueId.csv");
+            _allPackagesCsvPath = Path.Combine(logPath, @"allPackages.csv");
+            _packageCollectionFilePath = Path.Combine(logPath, @"packageCollection.txt");
 
-            createFile(_resultsCsv);
-            createFile(_uniqueIdCsv);
-            createFile(_allPackagesCsv);
+            _packageCollectionLock = new object();
+
+            _packageCollection = new Dictionary<string, Dictionary<string, List<string>>>();
+            _downloadCounts = new Dictionary<string, Dictionary<string, long>>();
+            _downloadCountsOverIds = new Dictionary<string, long>();
+            _unlistedPackageIds = new HashSet<string>();
+
+            createFile(_resultsCsvPath);
+            createFile(_uniqueIdCsvPath);
+            createFile(_allPackagesCsvPath);
         }
 
         public void createFile(string path)
@@ -55,8 +65,18 @@ namespace Nuget.NupkgParser
         {
             NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\MirrorPackages", outputPath: @"\\scratch2\scratch\anmishr\MirrorPackages_v3",
                                                             logPath: @"F:\ProcessedPackages");
-            nupkgParser.enumerateFiles();
+            if (nupkgParser.packageCollectionExists())
+            {
+                nupkgParser.deserializePackageCollection();
+            }
+            else
+            {
+                nupkgParser.enumerateFiles();
+                nupkgParser.serializePackageCollection();
+            }
+
             Console.WriteLine("Writting results into log");
+
             nupkgParser.primeDownloadCountsCache();
             nupkgParser.populateResultsCsv();
             nupkgParser.populateUniqueIdCsv();
@@ -72,7 +92,8 @@ namespace Nuget.NupkgParser
                 var inputFiles = Directory.EnumerateFiles(_inputPath).ToArray();
                 long count = 0;
                 long errorCount = 0;
-                Parallel.ForEach(inputFiles, file =>
+                ParallelOptions ops = new ParallelOptions { MaxDegreeOfParallelism = 8 };
+                Parallel.ForEach(inputFiles, ops, file =>
                 {
                     count++;
                     if (count % 10000 == 0)
@@ -109,6 +130,28 @@ namespace Nuget.NupkgParser
             }
         }
 
+        private void serializePackageCollection()
+        {
+            createFile(_packageCollectionFilePath);
+            var count = _packageCollection.Count();
+            var json = JsonConvert.SerializeObject(_packageCollection, Formatting.Indented);
+            //write to _packageCollectionFilePath
+            File.WriteAllText(_packageCollectionFilePath, json);
+        }
+
+        private void deserializePackageCollection()
+        {
+            _packageCollection.Clear();
+            //read into _packageCollection
+            var json = File.ReadAllText(_packageCollectionFilePath);
+            _packageCollection = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, List<string>>>>(json);
+        }
+
+        private bool packageCollectionExists()
+        {
+            return File.Exists(_packageCollectionFilePath);
+        }
+
         private void processArchive(string path)
         {
             using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
@@ -121,52 +164,90 @@ namespace Nuget.NupkgParser
                 if (ps1Files.Length > 0)
                 {
                     // Create V3 style location
-                    PackageArchiveReader packageReader = new PackageArchiveReader(archive);
-                    var packageIdentity = packageReader.GetIdentity();
-                    //var v3Path = createV3Folders(packageIdentity);
-                    //var newPath = Path.Combine(v3Path, Path.GetFileName(path));
-
-                    // Copy nupkg into v3 style structure
-                    //File.Copy(path, newPath);
-
-                    // Read nupkg for ps1's and extract the nupkgs into the same folder as nupkg
-
-                    foreach (var ps1FilePath in ps1Files)
+                    using (var packageReader = new PackageArchiveReader(archive))
                     {
-                        addToPackageCollection(packageIdentity, ps1FilePath);
-                        //var filePath = Path.Combine(v3Path, entry.FullName);
-                        //createDirectory(Directory.GetParent(filePath).FullName);
-                        //entry.ExtractToFile(filePath);
+                        var packageIdentity = packageReader.GetIdentity();
+                        //var v3Path = createV3Folders(packageIdentity);
+                        //var newPath = Path.Combine(v3Path, Path.GetFileName(path));
 
-                        //log(string.Concat(packageIdentity.Id, " ", packageIdentity.Version, " ", entry.Name));
+                        // Copy nupkg into v3 style structure
+                        //File.Copy(path, newPath);
+
+                        // Read nupkg for ps1's and extract the nupkgs into the same folder as nupkg
+
+                        foreach (var ps1FilePath in ps1Files)
+                        {
+                            //var filePath = Path.Combine(v3Path, ps1FilePath);
+                            //createDirectory(Directory.GetParent(filePath).FullName);
+                            using (var fileStream = archive.GetEntry(ps1FilePath).Open())
+                            {
+                                var md5Hash = calculateHashFromStream(fileStream);
+                                addToPackageCollection(packageIdentity, ps1FilePath, md5Hash);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        private void addToPackageCollection(PackageIdentity packageIdentity, string fileName)
+        private void addToPackageCollection(PackageIdentity packageIdentity, string fileName, string md5Hash)
         {
             string id = packageIdentity.Id;
             string version = packageIdentity.Version.ToString();
-            if (_packageCollection.ContainsKey(id))
+            var fileKey = string.Concat(md5Hash, "_", fileName);
+            lock (_packageCollectionLock)
             {
-                if (!_packageCollection[id].ContainsKey(fileName))
+                if (_packageCollection.ContainsKey(id))
                 {
-                    _packageCollection[id][fileName] = new ConcurrentQueue<string>();
+                    if (!_packageCollection[id].ContainsKey(fileKey))
+                    {
+                        _packageCollection[id][fileKey] = new List<string>();
+                    }
+                    _packageCollection[id][fileKey].Add(version);
                 }
-                _packageCollection[id][fileName].Enqueue(version);
+                else
+                {
+                    _packageCollection[id] = new Dictionary<string, List<string>>();
+                    _packageCollection[id][fileKey] = new List<string>();
+                    _packageCollection[id][fileKey].Add(version);
+                }
             }
-            else
+        }
+
+        private string calculateHash(string path)
+        {
+            using (var md5 = MD5.Create())
             {
-                _packageCollection[id] = new ConcurrentDictionary<string, ConcurrentQueue<string>>();
-                _packageCollection[id][fileName] = new ConcurrentQueue<string>();
-                _packageCollection[id][fileName].Enqueue(version);
+                using (var stream = File.OpenRead(path))
+                {
+                    var md5ByteArray = md5.ComputeHash(stream);
+                    var md5StringBuilder = new StringBuilder();
+                    for (int i = 0; i < md5ByteArray.Length; i++)
+                    {
+                        md5StringBuilder.Append(md5ByteArray[i].ToString("x2"));
+                    }
+                    return md5StringBuilder.ToString();
+                }
+            }
+        }
+
+        private string calculateHashFromStream(Stream fileStream)
+        {
+            using (var md5 = MD5.Create())
+            {
+                var md5ByteArray = md5.ComputeHash(fileStream);
+                var md5StringBuilder = new StringBuilder();
+                for (int i = 0; i < md5ByteArray.Length; i++)
+                {
+                    md5StringBuilder.Append(md5ByteArray[i].ToString("x2"));
+                }
+                return md5StringBuilder.ToString();
             }
         }
 
         private void populateResultsCsv()
         {
-            using (StreamWriter w = File.AppendText(_resultsCsv))
+            using (StreamWriter w = File.AppendText(_resultsCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
@@ -184,11 +265,12 @@ namespace Nuget.NupkgParser
 
         private void populateUniqueIdCsv()
         {
-            using (StreamWriter w = File.AppendText(_uniqueIdCsv))
+            using (StreamWriter w = File.AppendText(_uniqueIdCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
-                    w.WriteLine(id);
+                    var idDownloadCount = getDownloadCountFromIdCache(id);
+                    w.WriteLine(id + "," + idDownloadCount);
                 }
             }
         }
@@ -196,7 +278,7 @@ namespace Nuget.NupkgParser
         private void populateAllPackageCsv()
         {
             var seen = new HashSet<string>();
-            using (StreamWriter w = File.AppendText(_allPackagesCsv))
+            using (StreamWriter w = File.AppendText(_allPackagesCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
@@ -219,16 +301,27 @@ namespace Nuget.NupkgParser
 
         private void primeDownloadCountsCache()
         {
+            Console.WriteLine("Priming download count cache");
+            long count = 0;
             foreach (var id in _packageCollection.Keys)
             {
+                count++;
+                if (count % 1000 == 0)
+                {
+                    Console.WriteLine("Done with " + count + " ids out of " + _packageCollection.Count);
+                }
                 primeDownloadCountsCache(id);
             }
+            Console.WriteLine("Done with Priming download count cache");
         }
 
         private void primeDownloadCountsCache(string id)
         {
-            var jsonResponse = queryNuGetForDownloadData(id);
-            populateDownloadCounts(id, jsonResponse);
+            if (!_downloadCounts.ContainsKey(id) && !_unlistedPackageIds.Contains(id))
+            {
+                var jsonResponse = queryNuGetForDownloadData(id);
+                populateDownloadCounts(id, jsonResponse);
+            }
         }
 
         private JObject queryNuGetForDownloadData(string id)
@@ -243,30 +336,52 @@ namespace Nuget.NupkgParser
 
         private long getDownloadCount(string id, string version)
         {
-            if (!_downloadCounts.ContainsKey(id))
-            {
-                primeDownloadCountsCache(id);
-            }
+            primeDownloadCountsCache(id);
             return getDownloadCountFromCache(id, version);
+        }
+
+        private long getDownloadCount(string id)
+        {
+            primeDownloadCountsCache(id);
+            return getDownloadCountFromIdCache(id);
         }
 
         private void populateDownloadCounts(string id, JObject nugetQueryJson)
         {
-            var dataObject = nugetQueryJson["data"].Value<JArray>()[0];
-            var versionDataList = dataObject["versions"].Values<JObject>();
-            var versionCounts = new Dictionary<string, long>();
-            foreach (var versionData in versionDataList)
+            var dataObjectArray = nugetQueryJson["data"].Value<JArray>();
+            if (dataObjectArray.Count > 0)
             {
-                var version = versionData["version"].Value<string>();
-                var downloadCount = versionData["downloads"].Value<long>();
-                versionCounts[version] = downloadCount;
+                var dataObject = dataObjectArray[0];
+                var versionDataList = dataObject["versions"]?.Values<JObject>();
+                if (versionDataList != null)
+                {
+                    var versionCounts = new Dictionary<string, long>();
+                    long totalCount = 0;
+                    foreach (var versionData in versionDataList)
+                    {
+                        var version = versionData["version"].Value<string>();
+                        var downloadCount = versionData["downloads"].Value<long>();
+                        versionCounts[version] = downloadCount;
+                        totalCount += downloadCount;
+                    }
+                    _downloadCounts[id] = versionCounts;
+                    _downloadCountsOverIds[id] = totalCount;
+                }
             }
-            _downloadCounts[id] = versionCounts;
+            else
+            {
+                _unlistedPackageIds.Add(id);
+            }
         }
 
         private long getDownloadCountFromCache(string id, string version)
         {
             return (_downloadCounts.ContainsKey(id) && _downloadCounts[id].ContainsKey(version)) ? _downloadCounts[id][version] : -1;
+        }
+
+        private long getDownloadCountFromIdCache(string id)
+        {
+            return (_downloadCountsOverIds.ContainsKey(id)) ? _downloadCountsOverIds[id] : -1;
         }
 
         private string createV3Folders(PackageIdentity packageIdentity)
@@ -288,7 +403,7 @@ namespace Nuget.NupkgParser
 
         private void log(string line)
         {
-            using (StreamWriter w = File.AppendText(_resultsCsv))
+            using (StreamWriter w = File.AppendText(_resultsCsvPath))
             {
                 w.WriteLine(line);
             }

@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NuGet.Packaging;
 using NuGet.Packaging.Core;
+using NuGet.Versioning;
 
 namespace Nuget.NupkgParser
 {
@@ -22,9 +23,12 @@ namespace Nuget.NupkgParser
         private string _inputPath;
         private string _outputPath;
         private string _resultsCsvPath;
+        private string _resultsLatestCsvPath;
         private string _uniqueIdCsvPath;
         private string _allPackagesCsvPath;
         private string _packageCollectionFilePath;
+        private string _downloadCountsFilePath;
+        private string _downloadCountsOverIdFilePath;
         private object _packageCollectionLock;
 
         private Dictionary<string, Dictionary<string, List<string>>> _packageCollection;
@@ -37,9 +41,12 @@ namespace Nuget.NupkgParser
             _inputPath = inputPath;
             _outputPath = outputPath;
             _resultsCsvPath = Path.Combine(logPath, @"results.csv");
+            _resultsLatestCsvPath = Path.Combine(logPath, @"resultsLatestversion.csv");
             _uniqueIdCsvPath = Path.Combine(logPath, @"uniqueId.csv");
             _allPackagesCsvPath = Path.Combine(logPath, @"allPackages.csv");
             _packageCollectionFilePath = Path.Combine(logPath, @"packageCollection.txt");
+            _downloadCountsFilePath = Path.Combine(logPath, @"downloadsCounts.txt");
+            _downloadCountsOverIdFilePath = Path.Combine(logPath, @"downloadsCountsOverId.txt");
 
             _packageCollectionLock = new object();
 
@@ -51,6 +58,8 @@ namespace Nuget.NupkgParser
             createFile(_resultsCsvPath);
             createFile(_uniqueIdCsvPath);
             createFile(_allPackagesCsvPath);
+            createDirectory(_outputPath);
+            createDirectory(logPath);
         }
 
         public void createFile(string path)
@@ -63,8 +72,9 @@ namespace Nuget.NupkgParser
 
         private static void Main(string[] args)
         {
-            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\MirrorPackages", outputPath: @"\\scratch2\scratch\anmishr\MirrorPackages_v3",
+            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\MirrorPackages", outputPath: @"E:\MirrorPackages_deduped",
                                                             logPath: @"F:\ProcessedPackages");
+            Console.WriteLine("Populating packageCollection");
             if (nupkgParser.packageCollectionExists())
             {
                 nupkgParser.deserializePackageCollection();
@@ -75,11 +85,21 @@ namespace Nuget.NupkgParser
                 nupkgParser.serializePackageCollection();
             }
 
-            Console.WriteLine("Writting results into log");
+            Console.WriteLine("Populating download counts");
+            if (nupkgParser.downloadCountsExist())
+            {
+                nupkgParser.deserializeDownloadCounts();
+            }
+            else
+            {
+                nupkgParser.primeDownloadCountsCache();
+                nupkgParser.serializeDownloadCounts();
+            }
 
-            nupkgParser.primeDownloadCountsCache();
+            Console.WriteLine("Writting results into log");
             nupkgParser.populateResultsCsv();
             nupkgParser.populateUniqueIdCsv();
+            nupkgParser.populateLatestResultCsv();
             nupkgParser.populateAllPackageCsv();
         }
 
@@ -133,7 +153,6 @@ namespace Nuget.NupkgParser
         private void serializePackageCollection()
         {
             createFile(_packageCollectionFilePath);
-            var count = _packageCollection.Count();
             var json = JsonConvert.SerializeObject(_packageCollection, Formatting.Indented);
             //write to _packageCollectionFilePath
             File.WriteAllText(_packageCollectionFilePath, json);
@@ -152,6 +171,35 @@ namespace Nuget.NupkgParser
             return File.Exists(_packageCollectionFilePath);
         }
 
+        private void serializeDownloadCounts()
+        {
+            createFile(_downloadCountsFilePath);
+            var json = JsonConvert.SerializeObject(_downloadCounts, Formatting.Indented);
+            //write to _packageCollectionFilePath
+            File.WriteAllText(_downloadCountsFilePath, json);
+
+            createFile(_downloadCountsOverIdFilePath);
+            json = JsonConvert.SerializeObject(_downloadCountsOverIds, Formatting.Indented);
+            //write to _packageCollectionFilePath
+            File.WriteAllText(_downloadCountsOverIdFilePath, json);
+        }
+
+        private void deserializeDownloadCounts()
+        {
+            _downloadCounts.Clear();
+            _downloadCountsOverIds.Clear();
+            //read into _packageCollection
+            var json = File.ReadAllText(_downloadCountsFilePath);
+            _downloadCounts = JsonConvert.DeserializeObject<Dictionary<string, Dictionary<string, long>>>(json);
+            json = File.ReadAllText(_downloadCountsOverIdFilePath);
+            _downloadCountsOverIds = JsonConvert.DeserializeObject<Dictionary<string, long>>(json);
+        }
+
+        private bool downloadCountsExist()
+        {
+            return File.Exists(_downloadCountsFilePath) && File.Exists(_downloadCountsOverIdFilePath);
+        }
+
         private void processArchive(string path)
         {
             using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
@@ -168,13 +216,12 @@ namespace Nuget.NupkgParser
                     {
                         var packageIdentity = packageReader.GetIdentity();
                         //var v3Path = createV3Folders(packageIdentity);
-                        //var newPath = Path.Combine(v3Path, Path.GetFileName(path));
+                        //var newPath = Path.Combine(_outputPath, Path.GetFileName(path));
 
                         // Copy nupkg into v3 style structure
                         //File.Copy(path, newPath);
 
                         // Read nupkg for ps1's and extract the nupkgs into the same folder as nupkg
-
                         foreach (var ps1FilePath in ps1Files)
                         {
                             //var filePath = Path.Combine(v3Path, ps1FilePath);
@@ -247,17 +294,46 @@ namespace Nuget.NupkgParser
 
         private void populateResultsCsv()
         {
+            Console.WriteLine("Populating PackageId + File csv");
             using (StreamWriter w = File.AppendText(_resultsCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
-                    foreach (var fileName in _packageCollection[id].Keys)
+                    foreach (var fileKey in _packageCollection[id].Keys)
                     {
-                        var x = _packageCollection[id][fileName];
-                        var versionList = _packageCollection[id][fileName].ToArray();
+                        var versionList = _packageCollection[id][fileKey].ToArray();
                         var delimiter = " ";
                         var versionString = versionList.Aggregate((i, j) => i + delimiter + j);
-                        w.WriteLine(string.Concat(id, ",", fileName, ",", versionString));
+                        w.WriteLine(string.Concat(id, ",", fileKey, ",", versionString));
+                    }
+                }
+            }
+        }
+
+        private void populateLatestResultCsv()
+        {
+            Console.WriteLine("Populating PackageId + File + Latest Version csv");
+            using (StreamWriter w = File.AppendText(_resultsLatestCsvPath))
+            {
+                foreach (var id in _packageCollection.Keys)
+                {
+                    foreach (var fileKey in _packageCollection[id].Keys)
+                    {
+                        var latestVersion = _packageCollection[id][fileKey]
+                                            .Select(x => new NuGetVersion(x))
+                                            .OrderByDescending(version => version)
+                                            .Max();
+                        // var versionObjectList = versionList.Select(x => new NuGetVersion(x)).ToList();
+                        // var latestVersion = versionObjectList.OrderByDescending(version => version).Max();
+
+                        w.WriteLine(string.Concat(id, ",", fileKey, ",", latestVersion.ToNormalizedString()));
+
+                        // Move latest version into deduped location
+                        var latestVersionFileName = string.Concat(id, ".", latestVersion.ToNormalizedString(), ".nupkg");
+                        if (!File.Exists(Path.Combine(_outputPath, latestVersionFileName)))
+                        {
+                            File.Copy(Path.Combine(_inputPath, latestVersionFileName), Path.Combine(_outputPath, latestVersionFileName));
+                        }
                     }
                 }
             }
@@ -265,6 +341,7 @@ namespace Nuget.NupkgParser
 
         private void populateUniqueIdCsv()
         {
+            Console.WriteLine("Populating Unique PackageId csv");
             using (StreamWriter w = File.AppendText(_uniqueIdCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
@@ -277,14 +354,15 @@ namespace Nuget.NupkgParser
 
         private void populateAllPackageCsv()
         {
+            Console.WriteLine("Populating All Packages csv");
             var seen = new HashSet<string>();
             using (StreamWriter w = File.AppendText(_allPackagesCsvPath))
             {
                 foreach (var id in _packageCollection.Keys)
                 {
-                    foreach (var fileName in _packageCollection[id].Keys)
+                    foreach (var fileKey in _packageCollection[id].Keys)
                     {
-                        foreach (var version in _packageCollection[id][fileName])
+                        foreach (var version in _packageCollection[id][fileKey])
                         {
                             var count = getDownloadCount(id, version);
                             var dataString = string.Concat(id + "," + version + "," + count);
@@ -301,7 +379,6 @@ namespace Nuget.NupkgParser
 
         private void primeDownloadCountsCache()
         {
-            Console.WriteLine("Priming download count cache");
             long count = 0;
             foreach (var id in _packageCollection.Keys)
             {
@@ -312,7 +389,6 @@ namespace Nuget.NupkgParser
                 }
                 primeDownloadCountsCache(id);
             }
-            Console.WriteLine("Done with Priming download count cache");
         }
 
         private void primeDownloadCountsCache(string id)

@@ -64,6 +64,11 @@ namespace Nuget.NupkgParser
 
         public void createFile(string path)
         {
+            var dir = Path.GetDirectoryName(path);
+            if (!Directory.Exists(dir))
+            {
+                Directory.CreateDirectory(dir);
+            }
             if (!File.Exists(path))
             {
                 File.Create(path).Close();
@@ -93,14 +98,14 @@ namespace Nuget.NupkgParser
             else
             {
                 nupkgParser.primeDownloadCountsCache();
-                nupkgParser.serializeDownloadCounts();
+                //nupkgParser.serializeDownloadCounts();
             }
 
             Console.WriteLine("Writting results into log");
             nupkgParser.populateResultsCsv();
             nupkgParser.populateUniqueIdCsv();
-            nupkgParser.populateLatestResultCsv();
-            nupkgParser.populateAllPackageCsv();
+            //nupkgParser.populateLatestResultCsv();
+            //nupkgParser.populateAllPackageCsv();
         }
 
         private void enumerateFiles()
@@ -127,7 +132,7 @@ namespace Nuget.NupkgParser
                     }
                     try
                     {
-                        processArchive(file);
+                        processArchiveNuSpec(file);
                     }
                     catch (Exception ex)
                     {
@@ -200,7 +205,7 @@ namespace Nuget.NupkgParser
             return File.Exists(_downloadCountsFilePath) && File.Exists(_downloadCountsOverIdFilePath);
         }
 
-        private void processArchive(string path)
+        private void processArchivePs1(string path)
         {
             using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
             {
@@ -230,6 +235,39 @@ namespace Nuget.NupkgParser
                             {
                                 var md5Hash = calculateHashFromStream(fileStream);
                                 addToPackageCollection(packageIdentity, ps1FilePath, md5Hash);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void processArchiveNuSpec(string path)
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
+            {
+                var nuspecFiles = archive.Entries
+                    .Where(e => e.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase))
+                    .Select(e => e.FullName)
+                    .ToArray();
+
+                if (nuspecFiles.Length > 0)
+                {
+                    using (var packageReader = new PackageArchiveReader(archive))
+                    {
+                        var packageIdentity = packageReader.GetIdentity();
+
+                        // Read nupkg for ps1's and extract the nupkgs into the same folder as nupkg
+                        foreach (var nuspecFile in nuspecFiles)
+                        {
+                            using (var fileStream = archive.GetEntry(nuspecFile).Open())
+                            {
+                                // Parse NuSpec to find metadata/contentfiles tag
+                                var nuspec = new NuspecReader(fileStream);
+                                if(nuspec.GetContentFiles().Count() > 0)
+                                {
+                                    addToPackageCollection(packageIdentity, nuspecFile, "");
+                                }
                             }
                         }
                     }

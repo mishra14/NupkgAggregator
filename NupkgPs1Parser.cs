@@ -132,7 +132,7 @@ namespace Nuget.NupkgParser
                     }
                     try
                     {
-                        processArchiveNuSpec(file);
+                        processArchiveContentFile(file);
                     }
                     catch (Exception ex)
                     {
@@ -264,12 +264,27 @@ namespace Nuget.NupkgParser
                             {
                                 // Parse NuSpec to find metadata/contentfiles tag
                                 var nuspec = new NuspecReader(fileStream);
-                                if(nuspec.GetContentFiles().Count() > 0)
+                                if (nuspec.GetContentFiles().Count() > 0)
                                 {
                                     addToPackageCollection(packageIdentity, nuspecFile, "");
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        private void processArchiveContentFile(string path)
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
+            {
+                if (archive.Entries.Where(e => Directory.Exists(e.FullName)).Count() > 0)
+                {
+                    using (var packageReader = new PackageArchiveReader(archive))
+                    {
+                        var packageIdentity = packageReader.GetIdentity();
+                        addToPackageCollection(packageIdentity, "nuspec", "");
                     }
                 }
             }

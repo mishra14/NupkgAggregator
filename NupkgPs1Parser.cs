@@ -75,10 +75,18 @@ namespace Nuget.NupkgParser
             }
         }
 
+        private void createDirectory(string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                Directory.CreateDirectory(path);
+            }
+        }
+
         private static void Main(string[] args)
         {
-            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\MirrorPackages", outputPath: @"E:\MirrorPackages_deduped",
-                                                            logPath: @"F:\ProcessedPackages");
+            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\NupkgParser\MirrorPackages", outputPath: @"F:\NupkgParser\MirrorPackages_deduped",
+                                                            logPath: @"F:\NupkgParser\ProcessedPackages");
             Console.WriteLine("Populating packageCollection");
             if (nupkgParser.packageCollectionExists())
             {
@@ -132,7 +140,7 @@ namespace Nuget.NupkgParser
                     }
                     try
                     {
-                        processArchiveContentFile(file);
+                        processArchiveForPP(file);
                     }
                     catch (Exception ex)
                     {
@@ -269,6 +277,29 @@ namespace Nuget.NupkgParser
                                     addToPackageCollection(packageIdentity, nuspecFile, "");
                                 }
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void processArchiveForPP(string path)
+        {
+            using (var archive = ZipFile.Open(path, ZipArchiveMode.Read))
+            {
+                var ppFiles = archive.Entries.Where(e => e.FullName.EndsWith(".pp"));
+                foreach (var entry in archive.Entries)
+                {
+                    var x = entry.FullName;
+                }
+                if (ppFiles.Count() > 0)
+                {
+                    using (var packageReader = new PackageArchiveReader(archive))
+                    {
+                        var packageIdentity = packageReader.GetIdentity();
+                        foreach (var ppFile in ppFiles)
+                        {
+                            addToPackageCollection(packageIdentity, ppFile.FullName, "");
                         }
                     }
                 }
@@ -520,14 +551,6 @@ namespace Nuget.NupkgParser
             var versionDer = (Path.Combine(_outputPath, id, version.ToString()));
             createDirectory(versionDer);
             return versionDer;
-        }
-
-        private void createDirectory(string path)
-        {
-            if (!Directory.Exists(path))
-            {
-                Directory.CreateDirectory(path);
-            }
         }
 
         private void log(string line)

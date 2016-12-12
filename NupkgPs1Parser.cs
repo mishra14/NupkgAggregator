@@ -85,7 +85,7 @@ namespace Nuget.NupkgParser
 
         private static void Main(string[] args)
         {
-            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\NupkgParser\MirrorPackages_test", outputPath: @"F:\NupkgParser\MirrorPackages_deduped",
+            NupkgPs1Parser nupkgParser = new NupkgPs1Parser(inputPath: @"F:\NupkgParser\MirrorPackages", outputPath: @"F:\NupkgParser\MirrorPackages_deduped",
                                                             logPath: @"F:\NupkgParser\ProcessedLogs");
             Console.WriteLine("Populating packageCollection");
             if (nupkgParser.PackageCollectionExists())

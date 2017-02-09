@@ -7,8 +7,8 @@
     <ProjectGuid>{04F957F9-E517-4E9C-BEB8-E457E9DB0283}</ProjectGuid>
     <OutputType>Exe</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>Nuget.NupkgChecker</RootNamespace>
-    <AssemblyName>Nuget.NupkgChecker</AssemblyName>
+    <RootNamespace>NuGetPackages.Parser</RootNamespace>
+    <AssemblyName>NuGetPackages.Parser</AssemblyName>
     <TargetFrameworkVersion>v4.6.1</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>

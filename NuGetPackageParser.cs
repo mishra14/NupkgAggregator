@@ -24,10 +24,7 @@ namespace NugetPackages
 
         private string _inputPath;
         private string _outputPath;
-        private string _resultsCsvPath;
-        private string _resultsLatestCsvPath;
-        private string _uniqueIdCsvPath;
-        private string _allPackagesCsvPath;
+        private string _logPath;
         private string _packageCollectionFilePath;
         private string _downloadCountsFilePath;
         private string _downloadCountsOverIdFilePath;
@@ -39,14 +36,11 @@ namespace NugetPackages
         private Dictionary<string, long> _downloadCountsOverIds;
         private HashSet<string> _unlistedPackageIds;
 
-        public NuGetPackageParser(string inputPath, string outputPath, string logPath, bool cleanResultFiles, bool isInputV3Style)
+        public NuGetPackageParser(string inputPath, string outputPath, string logPath, bool isInputV3Style)
         {
             _inputPath = inputPath;
             _outputPath = outputPath;
-            _resultsCsvPath = Path.Combine(logPath, @"results.csv");
-            _resultsLatestCsvPath = Path.Combine(logPath, @"resultsLatestversion.csv");
-            _uniqueIdCsvPath = Path.Combine(logPath, @"uniqueId.csv");
-            _allPackagesCsvPath = Path.Combine(logPath, @"allPackages.csv");
+            _logPath = logPath;
             _packageCollectionFilePath = Path.Combine(logPath, @"packageCollection.txt");
             _downloadCountsFilePath = Path.Combine(logPath, @"downloadsCounts.txt");
             _downloadCountsOverIdFilePath = Path.Combine(logPath, @"downloadsCountsOverId.txt");
@@ -60,25 +54,20 @@ namespace NugetPackages
             _downloadCountsOverIds = new Dictionary<string, long>();
             _unlistedPackageIds = new HashSet<string>();
 
-            if (cleanResultFiles && Directory.Exists(logPath))
-            {
-                Directory.Delete(logPath, recursive: true);
-            }
-
             CreateDirectory(_outputPath);
-            CreateDirectory(logPath);
-            CreateFile(_resultsCsvPath);
-            CreateFile(_resultsLatestCsvPath);
-            CreateFile(_uniqueIdCsvPath);
-            CreateFile(_allPackagesCsvPath);
+            CreateDirectory(_logPath);
         }
 
-        public void CreateFile(string path)
+        public void CreateFile(string path, bool deleteIfExists)
         {
             var dir = Path.GetDirectoryName(path);
             if (!Directory.Exists(dir))
             {
                 Directory.CreateDirectory(dir);
+            }
+            if (File.Exists(path) && deleteIfExists)
+            {
+                File.Delete(path);
             }
             if (!File.Exists(path))
             {
@@ -95,53 +84,55 @@ namespace NugetPackages
         }
 
         private static void Main(string[] args)
-        {
-            var cleanResultFiles = true;
-
+        {          
             var nugetPackageParser = new NuGetPackageParser(inputPath: @"\\juste-box\nuget", // 
                 outputPath: @"F:\NuGetPackageParser\MirrorPackages_deduped",
                 logPath: @"F:\NuGetPackageParser\ProcessedLogs",
-                cleanResultFiles: cleanResultFiles,
                 isInputV3Style: true);
 
             Console.WriteLine("Populating packageCollection");
-            if (!cleanResultFiles && nugetPackageParser.PackageCollectionExists())
-            {
-                nugetPackageParser.DeserializePackageCollection();
-            }
-            else
-            {
-                nugetPackageParser.EnumerateFiles(onlyLatest: false);
-                nugetPackageParser.SerializePackageCollection();
-            }
+            nugetPackageParser.EnumerateFiles(onlyLatest: false, clearPackageCollectionCache: false);
 
             Console.WriteLine("Populating download counts");
-            if (nugetPackageParser.DownloadCountsExist())
-            {
-                nugetPackageParser.DeserializeDownloadCounts();
-            }
-            else
-            {
-                nugetPackageParser.PrimeDownloadCountsCache();
-                nugetPackageParser.SerializeDownloadCounts();
-            }
+            nugetPackageParser.GetDownloadsCount(clearDownloadsCache: true);
 
             Console.WriteLine("Writting results into log");
-            nugetPackageParser.PopulateResultsCsv();
-            nugetPackageParser.PopulateUniqueIdCsv();
-            //nupkgParser.populateLatestResultCsv();
-            //nupkgParser.populateAllPackageCsv();
+            //nugetPackageParser.GenerateResults();
+            nugetPackageParser.GenerateIdLatestVersionDownloadCountCsv();
         }
 
-        private void EnumerateFiles(bool onlyLatest)
+        private void EnumerateFiles(bool onlyLatest, bool clearPackageCollectionCache)
         {
-            if (_isInputV3Style)
+            if (!clearPackageCollectionCache && PackageCollectionExists())
             {
-                EnumerateFilesV3Style(onlyLatest);
+                DeserializePackageCollection();
             }
             else
             {
-                // EnumerateFilesFlatStyle();
+                if (_isInputV3Style)
+                {
+                    EnumerateFilesV3Style(onlyLatest);
+                }
+                else
+                {
+                    // No OnlyLatest option in here yet
+                    EnumerateFilesFlatStyle();
+                }
+                SerializePackageCollection(clearPackageCollectionCache);
+            }
+        }
+
+
+        private void GetDownloadsCount(bool clearDownloadsCache)
+        {
+            if (!clearDownloadsCache && DownloadCountsExist())
+            {
+                DeserializeDownloadCounts();
+            }
+            else
+            {
+                PrimeDownloadCountsCache();
+                SerializeDownloadCounts(clearDownloadsCache);
             }
         }
 
@@ -155,7 +146,6 @@ namespace NugetPackages
                 long count = 0;
                 long errorCount = 0;
                 var logger = new CommandOutputLogger(NuGet.Common.LogLevel.Information);
-                var packageIds = new HashSet<string>();
                 ParallelOptions ops = new ParallelOptions { MaxDegreeOfParallelism = _maxThreadCount };
                 Parallel.ForEach(packageDirectories, ops, packageDirectory =>
                 {
@@ -168,20 +158,14 @@ namespace NugetPackages
                     try
                     {
                         var id = Path.GetFileName(packageDirectory);
-
                         var idPackages = LocalFolderUtility.GetPackagesV3(_inputPath, id, logger);
 
-                        //var versions = Directory.EnumerateDirectories(packageDirectory)
-                        //    .ToArray();
                         if (onlyLatest)
                         {
-                            var package = idPackages.OrderByDescending(e => e.Identity.Version).First();
+                            var package = idPackages
+                                .OrderByDescending(e => e.Identity.Version)
+                                .Max();
 
-                            //var latestVersion = versions
-                            //    .Select(f => new NuGetVersion(Path.GetFileName(f)))
-                            //    .OrderByDescending(version => version)
-                            //    .Max();
-                            //var package = Directory.GetFiles(Path.Combine(packageDirectory, latestVersion.ToNormalizedString()), "*.nupkg").First();
                             ProcessArchiveForNuGetAPIsUsedInScripts(package);
                         }
                         else
@@ -213,47 +197,48 @@ namespace NugetPackages
             }
         }
 
-        //private void EnumerateFilesFlatStyle()
-        //{
-        //    try
-        //    {
-        //        Stopwatch timer = new Stopwatch();
-        //        timer.Start();
-        //        var inputFiles = Directory.EnumerateFiles(_inputPath).ToArray();
-        //        long count = 0;
-        //        long errorCount = 0;
-        //        ParallelOptions ops = new ParallelOptions { MaxDegreeOfParallelism = _maxThreadCount };
-        //        Parallel.ForEach(inputFiles, ops, file =>
-        //        {
-        //            count++;
-        //            if (count % 10000 == 0)
-        //            {
-        //                DisplayStats(count, errorCount, inputFiles.Length, timer);
-        //            }
-        //            try
-        //            {
-        //                ProcessArchiveForNuGetAPIsUsedInScripts(file);
-        //            }
-        //            catch (Exception ex)
-        //            {
-        //                errorCount++;
-        //                Console.WriteLine("Exception while parsing " + file);
-        //                Console.WriteLine(ex.Message);
-        //                var curroptFilePath = Path.Combine(@"f:\CurroptPackages", Path.GetFileName(file));
-        //                File.Move(file, curroptFilePath);
-        //            }
-        //        });
-        //        Console.WriteLine("Done with all the " + count + " packages");
-        //    }
-        //    catch (AggregateException ae)
-        //    {
-        //        // This is where you can choose which exceptions to handle.
-        //        foreach (var ex in ae.InnerExceptions)
-        //        {
-        //            Console.WriteLine(ex.Message);
-        //        }
-        //    }
-        //}
+        private void EnumerateFilesFlatStyle()
+        {
+            try
+            {
+                Stopwatch timer = new Stopwatch();
+                timer.Start();
+                var inputFiles = Directory.EnumerateFiles(_inputPath).ToArray();
+                long count = 0;
+                long errorCount = 0;
+                var logger = new CommandOutputLogger(NuGet.Common.LogLevel.Information);
+                ParallelOptions ops = new ParallelOptions { MaxDegreeOfParallelism = _maxThreadCount };
+                Parallel.ForEach(inputFiles, ops, file =>
+                {
+                    count++;
+                    if (count % 10000 == 0)
+                    {
+                        DisplayStats(count, errorCount, inputFiles.Length, timer);
+                    }
+                    try
+                    {
+                        //ProcessArchiveForNuGetAPIsUsedInScripts(file);
+                    }
+                    catch (Exception ex)
+                    {
+                        errorCount++;
+                        Console.WriteLine("Exception while parsing " + file);
+                        Console.WriteLine(ex.Message);
+                        var curroptFilePath = Path.Combine(@"f:\CurroptPackages", Path.GetFileName(file));
+                        File.Move(file, curroptFilePath);
+                    }
+                });
+                Console.WriteLine("Done with all the " + count + " packages");
+            }
+            catch (AggregateException ae)
+            {
+                // This is where you can choose which exceptions to handle.
+                foreach (var ex in ae.InnerExceptions)
+                {
+                    Console.WriteLine(ex.Message);
+                }
+            }
+        }
 
         private void DisplayStats(long count, long errorCount, int fileCount, Stopwatch timer)
         {
@@ -265,9 +250,9 @@ namespace NugetPackages
             Console.WriteLine($"Done in {timeLeftSpan} at {dateEnd}");
         }
 
-        private void SerializePackageCollection()
+        private void SerializePackageCollection(bool clearPackageCollectionCache)
         {
-            CreateFile(_packageCollectionFilePath);
+            CreateFile(_packageCollectionFilePath, deleteIfExists: clearPackageCollectionCache);
             var json = JsonConvert.SerializeObject(_packageCollection, Formatting.Indented);
             //write to _packageCollectionFilePath
             File.WriteAllText(_packageCollectionFilePath, json);
@@ -286,14 +271,14 @@ namespace NugetPackages
             return File.Exists(_packageCollectionFilePath);
         }
 
-        private void SerializeDownloadCounts()
+        private void SerializeDownloadCounts(bool clearDownloadsCache)
         {
-            CreateFile(_downloadCountsFilePath);
+            CreateFile(_downloadCountsFilePath, deleteIfExists: clearDownloadsCache);
             var json = JsonConvert.SerializeObject(_downloadCounts, Formatting.Indented);
             //write to _packageCollectionFilePath
             File.WriteAllText(_downloadCountsFilePath, json);
 
-            CreateFile(_downloadCountsOverIdFilePath);
+            CreateFile(_downloadCountsOverIdFilePath, deleteIfExists: clearDownloadsCache);
             json = JsonConvert.SerializeObject(_downloadCountsOverIds, Formatting.Indented);
             //write to _packageCollectionFilePath
             File.WriteAllText(_downloadCountsOverIdFilePath, json);
@@ -515,17 +500,28 @@ namespace NugetPackages
             }
         }
 
-        private void PopulateResultsCsv()
+        private void GenerateResults()
         {
-            Console.WriteLine("Populating PackageId + File csv");
-            using (StreamWriter w = File.AppendText(_resultsCsvPath))
+            GenerateIdFileVersionsCsv();
+            GenerateUniqueIdDownloadCountCsv();
+            GenerateIdLatestVersionCsv();
+        }
+
+
+        private void GenerateIdFileVersionsCsv()
+        {           
+            var outputFilePath = Path.Combine(_logPath, @"PackageId_File_Versions.csv");
+            CreateFile(outputFilePath, deleteIfExists: true);
+            Console.WriteLine($"Generating Id -> File -> Versions CSV file at {outputFilePath}");
+            using (StreamWriter w = File.AppendText(outputFilePath))
             {
+                w.WriteLine("Package Id, File Path, Package Versions");
                 foreach (var id in _packageCollection.Keys)
                 {
                     foreach (var fileKey in _packageCollection[id].Keys)
                     {
                         var versionList = _packageCollection[id][fileKey].ToArray();
-                        var delimiter = " ";
+                        var delimiter = "  ";
                         var versionString = versionList.Aggregate((i, j) => i + delimiter + j);
                         w.WriteLine(string.Concat(id, ",", fileKey, ",", versionString));
                     }
@@ -533,11 +529,14 @@ namespace NugetPackages
             }
         }
 
-        private void PopulateLatestResultCsv()
+        private void GenerateIdLatestVersionCsv()
         {
-            Console.WriteLine("Populating PackageId + File + Latest Version csv");
-            using (StreamWriter w = File.AppendText(_resultsLatestCsvPath))
+            var outputFilePath = Path.Combine(_logPath, @"PackageId_File_LatestVersion.csv");
+            CreateFile(outputFilePath, deleteIfExists: true);
+            Console.WriteLine($"Generating Id -> File -> LatestVersions CSV file at {outputFilePath}");
+            using (StreamWriter w = File.AppendText(outputFilePath))
             {
+                w.WriteLine("Package Id, File Path, Latest Package Version");
                 foreach (var id in _packageCollection.Keys)
                 {
                     foreach (var fileKey in _packageCollection[id].Keys)
@@ -546,27 +545,21 @@ namespace NugetPackages
                                             .Select(x => new NuGetVersion(x))
                                             .OrderByDescending(version => version)
                                             .Max();
-                        // var versionObjectList = versionList.Select(x => new NuGetVersion(x)).ToList();
-                        // var latestVersion = versionObjectList.OrderByDescending(version => version).Max();
 
                         w.WriteLine(string.Concat(id, ",", fileKey, ",", latestVersion.ToNormalizedString()));
-
-                        // Move latest version into deduped location
-                        var latestVersionFileName = string.Concat(id, ".", latestVersion.ToNormalizedString(), ".nupkg");
-                        if (!File.Exists(Path.Combine(_outputPath, latestVersionFileName)))
-                        {
-                            File.Copy(Path.Combine(_inputPath, latestVersionFileName), Path.Combine(_outputPath, latestVersionFileName));
-                        }
                     }
                 }
             }
         }
 
-        private void PopulateUniqueIdCsv()
+        private void GenerateUniqueIdDownloadCountCsv()
         {
-            Console.WriteLine("Populating Unique PackageId csv");
-            using (StreamWriter w = File.AppendText(_uniqueIdCsvPath))
+            var outputFilePath = Path.Combine(_logPath, @"PackageId_TotalDownloadCount.csv");
+            CreateFile(outputFilePath, deleteIfExists: true);
+            Console.WriteLine($"Generating Id -> TotalDownloadCount CSV file at {outputFilePath}");
+            using (StreamWriter w = File.AppendText(outputFilePath))
             {
+                w.WriteLine("Package Id, Total Download Count");
                 foreach (var id in _packageCollection.Keys)
                 {
                     var idDownloadCount = GetDownloadCountFromIdCache(id);
@@ -575,12 +568,15 @@ namespace NugetPackages
             }
         }
 
-        private void PopulateAllPackageCsv()
+        private void GenerateIdVersionDownloadCountCsv()
         {
-            Console.WriteLine("Populating All Packages csv");
+            var outputFilePath = Path.Combine(_logPath, @"PackageId_Version_DownloadCount.csv");
+            CreateFile(outputFilePath, deleteIfExists: true);
+            Console.WriteLine($"Generating Id -> Version -> DownloadCount CSV file at {outputFilePath}");
             var seen = new HashSet<string>();
-            using (StreamWriter w = File.AppendText(_allPackagesCsvPath))
+            using (StreamWriter w = File.AppendText(outputFilePath))
             {
+                w.WriteLine("Package Id, Package Version, Download Count");
                 foreach (var id in _packageCollection.Keys)
                 {
                     foreach (var fileKey in _packageCollection[id].Keys)
@@ -594,6 +590,35 @@ namespace NugetPackages
                                 seen.Add(dataString);
                                 w.WriteLine(dataString);
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void GenerateIdLatestVersionDownloadCountCsv()
+        {
+            var outputFilePath = Path.Combine(_logPath, @"PackageId_LatestVersion_DownloadCount.csv");
+            CreateFile(outputFilePath, deleteIfExists: true);
+            Console.WriteLine($"Generating Id -> LatestVersion -> DownloadCount CSV file at {outputFilePath}");
+            var seen = new HashSet<string>();
+            using (StreamWriter w = File.AppendText(outputFilePath))
+            {
+                w.WriteLine("Package Id, Package Latest Version, Download Count");
+                foreach (var id in _packageCollection.Keys)
+                {
+                    foreach (var fileKey in _packageCollection[id].Keys)
+                    {
+                        var latestVersion = _packageCollection[id][fileKey]
+                                            .Select(x => new NuGetVersion(x))
+                                            .OrderByDescending(version => version)
+                                            .Max();
+                        var count = GetDownloadCount(id, latestVersion.ToNormalizedString());
+                        var dataString = string.Concat(id + "," + latestVersion.ToNormalizedString() + "," + count);
+                        if (!seen.Contains(dataString))
+                        {
+                            seen.Add(dataString);
+                            w.WriteLine(dataString);
                         }
                     }
                 }
@@ -628,7 +653,6 @@ namespace NugetPackages
             using (var wc = new WebClient())
             {
                 var jsonResponse = JObject.Parse(wc.DownloadString(string.Concat(_downloadCountUrl, id, "&prerelease=true")));
-                //var json = JObject.Parse("{\"@context\":{\"@vocab\":\"http://schema.nuget.org/schema#\",\"@base\":\"https://api.nuget.org/v3/registration0/\"},\"totalHits\":1,\"lastReopen\":\"2016-09-06T19:35:04.7078505Z\",\"index\":\"v3-lucene0-v2v3-20160725\",\"data\":[{\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/index.json\",\"@type\":\"Package\",\"registration\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/index.json\",\"id\":\"Newtonsoft.Json\",\"version\":\"9.0.1\",\"description\":\"Json.NET is a popular high-performance JSON framework for .NET\",\"summary\":\"\",\"title\":\"Json.NET\",\"iconUrl\":\"http://www.newtonsoft.com/content/images/nugeticon.png\",\"licenseUrl\":\"https://raw.github.com/JamesNK/Newtonsoft.Json/master/LICENSE.md\",\"projectUrl\":\"http://www.newtonsoft.com/json\",\"tags\":[\"json\"],\"authors\":[\"James Newton-King\"],\"totalDownloads\":35972382,\"versions\":[{\"version\":\"3.5.8\",\"downloads\":31842,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/3.5.8.json\"},{\"version\":\"4.0.1\",\"downloads\":24634,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.1.json\"},{\"version\":\"4.0.2\",\"downloads\":51515,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.2.json\"},{\"version\":\"4.0.3\",\"downloads\":29743,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.3.json\"},{\"version\":\"4.0.4\",\"downloads\":28415,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.4.json\"},{\"version\":\"4.0.5\",\"downloads\":73106,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.5.json\"},{\"version\":\"4.0.6\",\"downloads\":12694,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.6.json\"},{\"version\":\"4.0.7\",\"downloads\":256623,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.7.json\"},{\"version\":\"4.0.8\",\"downloads\":222551,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.0.8.json\"},{\"version\":\"4.5.1\",\"downloads\":177144,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.1.json\"},{\"version\":\"4.5.2\",\"downloads\":12432,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.2.json\"},{\"version\":\"4.5.3\",\"downloads\":24283,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.3.json\"},{\"version\":\"4.5.4\",\"downloads\":51220,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.4.json\"},{\"version\":\"4.5.5\",\"downloads\":63726,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.5.json\"},{\"version\":\"4.5.6\",\"downloads\":879895,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.6.json\"},{\"version\":\"4.5.7\",\"downloads\":223289,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.7.json\"},{\"version\":\"4.5.8\",\"downloads\":211536,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.8.json\"},{\"version\":\"4.5.9\",\"downloads\":170790,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.9.json\"},{\"version\":\"4.5.10\",\"downloads\":278682,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.10.json\"},{\"version\":\"4.5.11\",\"downloads\":2579161,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/4.5.11.json\"},{\"version\":\"5.0.1\",\"downloads\":350752,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.1.json\"},{\"version\":\"5.0.2\",\"downloads\":243064,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.2.json\"},{\"version\":\"5.0.3\",\"downloads\":260181,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.3.json\"},{\"version\":\"5.0.4\",\"downloads\":734620,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.4.json\"},{\"version\":\"5.0.5\",\"downloads\":443202,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.5.json\"},{\"version\":\"5.0.6\",\"downloads\":1834875,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.6.json\"},{\"version\":\"5.0.7\",\"downloads\":415827,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.7.json\"},{\"version\":\"5.0.8\",\"downloads\":1964082,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/5.0.8.json\"},{\"version\":\"6.0.1\",\"downloads\":1053770,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.1.json\"},{\"version\":\"6.0.2\",\"downloads\":611365,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.2.json\"},{\"version\":\"6.0.3\",\"downloads\":1405283,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.3.json\"},{\"version\":\"6.0.4\",\"downloads\":3573169,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.4.json\"},{\"version\":\"6.0.5\",\"downloads\":1356971,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.5.json\"},{\"version\":\"6.0.6\",\"downloads\":2545024,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.6.json\"},{\"version\":\"6.0.7\",\"downloads\":582617,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.7.json\"},{\"version\":\"6.0.8\",\"downloads\":3637795,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/6.0.8.json\"},{\"version\":\"7.0.1\",\"downloads\":4053031,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/7.0.1.json\"},{\"version\":\"8.0.1\",\"downloads\":469135,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/8.0.1.json\"},{\"version\":\"8.0.2\",\"downloads\":1707785,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/8.0.2.json\"},{\"version\":\"8.0.3\",\"downloads\":1994315,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/8.0.3.json\"},{\"version\":\"9.0.1\",\"downloads\":1010277,\"@id\":\"https://api.nuget.org/v3/registration0/newtonsoft.json/9.0.1.json\"}]}]}");
                 return jsonResponse;
             }
         }
@@ -690,14 +714,6 @@ namespace NugetPackages
             var versionDer = (Path.Combine(_outputPath, id, version.ToString()));
             CreateDirectory(versionDer);
             return versionDer;
-        }
-
-        private void Log(string line)
-        {
-            using (StreamWriter w = File.AppendText(_resultsCsvPath))
-            {
-                w.WriteLine(line);
-            }
         }
 
         private void LogError(string line, string errorFilePath)
